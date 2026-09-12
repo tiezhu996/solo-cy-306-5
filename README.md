@@ -40,7 +40,7 @@ cd backend && go mod tidy && go run ./cmd/server
 cd backend && go test ./...
 ```
 
-其中 `internal/integration` 为基于真实 MySQL 的报名并发与回滚测试（并发名额不超卖、失败回滚不留数据、审核/签到状态顺序）。默认连接 `127.0.0.1:57506` 的 `gbevent_testdb` 库（对应 docker-compose 的端口与 root 密码），可用环境变量覆盖；MySQL 不可达时自动跳过：
+其中 `internal/integration` 为基于真实 MySQL 的报名并发与回滚测试（并发名额不超卖、失败回滚不留数据、审核/签到状态顺序）。该套件是**测试门禁**：默认运行时 MySQL 不可达会以失败结束并给出提示（全部通过 ⇔ 用例真实执行过）；本地只想跑单元测试可用 `go test -short ./...` 显式跳过。默认连接 `127.0.0.1:57506` 的 `gbevent_testdb` 库（对应 docker-compose 的端口与 root 密码），可用环境变量覆盖：
 
 ```bash
 GBEVENT_TEST_MYSQL_DSN="root:gbevent_root@tcp(127.0.0.1:57506)/gbevent_testdb?charset=utf8mb4&parseTime=True&loc=Local" \
