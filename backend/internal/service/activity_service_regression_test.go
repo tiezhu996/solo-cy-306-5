@@ -197,10 +197,11 @@ func TestActivityStats(t *testing.T) {
 	future := time.Now().Add(24 * time.Hour)
 	s := newTestStack(t)
 	a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
-	// 2 个有效报名（1 已签到）+ 1 个已取消（不计入）。
+	// 2 个有效报名（1 已签到）+ 1 个已取消 + 1 个审核被拒（后两者均不计入）。
 	s.mustRegistration(t, a.ID, 100, constants.RegistrationStatusRegistered, constants.ReviewStatusApproved)
 	checked := s.mustRegistration(t, a.ID, 101, constants.RegistrationStatusCheckedIn, constants.ReviewStatusApproved)
 	s.mustRegistration(t, a.ID, 102, constants.RegistrationStatusCancelled, constants.ReviewStatusPending)
+	s.mustRegistration(t, a.ID, 103, constants.RegistrationStatusRegistered, constants.ReviewStatusRejected)
 	if err := s.db.Create(&model.CheckInRecord{
 		RegistrationID: checked.ID, ActivityID: a.ID,
 		CheckInMethod: constants.CheckInMethodVoucher, CheckInTime: time.Now(), OperatorID: 5,
@@ -237,13 +238,14 @@ func TestActivityStats(t *testing.T) {
 		"Activity[id="+itoa(a.ID)+"] stats forbidden: organizer not match")
 }
 
-// TestActivityGetRegisteredCount 详情接口的报名人数不计已取消。
+// TestActivityGetRegisteredCount 详情接口的报名人数不计已取消与审核被拒。
 func TestActivityGetRegisteredCount(t *testing.T) {
 	future := time.Now().Add(24 * time.Hour)
 	s := newTestStack(t)
 	a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
 	s.mustRegistration(t, a.ID, 100, constants.RegistrationStatusRegistered, constants.ReviewStatusPending)
 	s.mustRegistration(t, a.ID, 101, constants.RegistrationStatusCancelled, constants.ReviewStatusPending)
+	s.mustRegistration(t, a.ID, 102, constants.RegistrationStatusRegistered, constants.ReviewStatusRejected)
 
 	_, count, err := s.activity.Get(a.ID)
 	if err != nil {

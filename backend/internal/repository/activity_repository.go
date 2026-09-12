@@ -104,12 +104,12 @@ func (r *ActivityRepository) CalendarCounts(start, end time.Time) ([]model.Activ
 	return list, nil
 }
 
-// CountRegistered 统计活动已报名人数（未取消）。
+// CountRegistered 统计活动已报名人数（未取消且审核未被拒）。
 func (r *ActivityRepository) CountRegistered(activityID uint64) (int64, error) {
 	return r.countRegistered(r.db, activityID)
 }
 
-// CountRegisteredTx 在事务内统计活动已报名人数（未取消）。
+// CountRegisteredTx 在事务内统计活动已报名人数（未取消且审核未被拒）。
 func (r *ActivityRepository) CountRegisteredTx(tx *gorm.DB, activityID uint64) (int64, error) {
 	return r.countRegistered(tx, activityID)
 }
@@ -117,7 +117,8 @@ func (r *ActivityRepository) CountRegisteredTx(tx *gorm.DB, activityID uint64) (
 func (r *ActivityRepository) countRegistered(db *gorm.DB, activityID uint64) (int64, error) {
 	var n int64
 	if err := db.Model(&model.Registration{}).
-		Where("activity_id = ? AND status <> ?", activityID, "cancelled").Count(&n).Error; err != nil {
+		Where("activity_id = ? AND status <> ? AND review_status <> ?", activityID, "cancelled", "rejected").
+		Count(&n).Error; err != nil {
 		return 0, fmt.Errorf("count registrations: %w", err)
 	}
 	return n, nil

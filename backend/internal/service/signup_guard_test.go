@@ -15,16 +15,19 @@ import (
 
 // TestSignupGuardCheckRegistrationLimit 名额与截止时间校验矩阵：
 // 活动状态、截止时间与容量判断的错误码、文案必须与重构前逐项一致。
+// 计数规则：未审核/已通过/已签到占用名额，已取消与审核被拒不占用。
 func TestSignupGuardCheckRegistrationLimit(t *testing.T) {
 	future := time.Now().Add(24 * time.Hour)
 	past := time.Now().Add(-time.Hour)
+
+	type regSeed struct{ status, reviewStatus string }
 
 	cases := []struct {
 		name        string
 		status      string
 		capacity    int
 		deadline    time.Time
-		seed        []string // 预置报名状态
+		seed        []regSeed // 预置报名
 		wantCode    int
 		wantMessage string // 含 %d 时为活动 ID 占位
 	}{
@@ -35,24 +38,34 @@ func TestSignupGuardCheckRegistrationLimit(t *testing.T) {
 		{"deadline passed", constants.ActivityStatusPublished, 0, past, nil,
 			constants.CodeActivityEnded, "Activity[id=%d] signup deadline passed"},
 		{"capacity zero unlimited", constants.ActivityStatusPublished, 0, future,
-			[]string{constants.RegistrationStatusRegistered, constants.RegistrationStatusRegistered}, 0, ""},
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusPending},
+				{constants.RegistrationStatusRegistered, constants.ReviewStatusPending}}, 0, ""},
 		{"capacity reached", constants.ActivityStatusPublished, 2, future,
-			[]string{constants.RegistrationStatusRegistered, constants.RegistrationStatusCheckedIn},
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusPending},
+				{constants.RegistrationStatusCheckedIn, constants.ReviewStatusApproved}},
 			constants.CodeActivityFull, constants.MsgActivityFull},
 		{"capacity not reached", constants.ActivityStatusPublished, 2, future,
-			[]string{constants.RegistrationStatusRegistered}, 0, ""},
-		{"cancelled not counted", constants.ActivityStatusPublished, 1, future,
-			[]string{constants.RegistrationStatusCancelled}, 0, ""},
-		{"checked in counts", constants.ActivityStatusPublished, 1, future,
-			[]string{constants.RegistrationStatusCheckedIn},
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusPending}}, 0, ""},
+		{"pending counts", constants.ActivityStatusPublished, 1, future,
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusPending}},
 			constants.CodeActivityFull, constants.MsgActivityFull},
+		{"approved counts", constants.ActivityStatusPublished, 1, future,
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusApproved}},
+			constants.CodeActivityFull, constants.MsgActivityFull},
+		{"cancelled not counted", constants.ActivityStatusPublished, 1, future,
+			[]regSeed{{constants.RegistrationStatusCancelled, constants.ReviewStatusPending}}, 0, ""},
+		{"checked in counts", constants.ActivityStatusPublished, 1, future,
+			[]regSeed{{constants.RegistrationStatusCheckedIn, constants.ReviewStatusApproved}},
+			constants.CodeActivityFull, constants.MsgActivityFull},
+		{"rejected not counted", constants.ActivityStatusPublished, 1, future,
+			[]regSeed{{constants.RegistrationStatusRegistered, constants.ReviewStatusRejected}}, 0, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStack(t)
 			a := s.mustActivity(t, 5, tc.status, tc.capacity, tc.deadline)
-			for i, st := range tc.seed {
-				s.mustRegistration(t, a.ID, uint64(100+i), st, constants.ReviewStatusPending)
+			for i, seed := range tc.seed {
+				s.mustRegistration(t, a.ID, uint64(100+i), seed.status, seed.reviewStatus)
 			}
 
 			err := s.guard.CheckRegistrationLimit(a.ID)

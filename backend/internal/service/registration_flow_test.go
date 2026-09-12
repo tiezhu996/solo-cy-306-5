@@ -378,6 +378,63 @@ func TestCheckInFlow(t *testing.T) {
 	})
 }
 
+// TestRejectedFreesSlot 名额为 1 的活动：唯一报名被拒后空位释放，新报名成功；
+// 同一人重复报名仍被拒绝，重复审核仍冲突且不回滚通知。
+func TestRejectedFreesSlot(t *testing.T) {
+	s := newTestStack(t)
+	a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 1, time.Now().Add(24*time.Hour))
+
+	// 用户 100 报名占满唯一名额。
+	reg, err := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	// 用户 101 报名：名额已满。
+	_, err = s.reg.Create(a.ID, 101, "李四", "13900000000", "")
+	requireAppError(t, err, constants.CodeActivityFull, constants.MsgActivityFull)
+
+	// 组织者拒绝用户 100 的报名。
+	if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusRejected); err != nil {
+		t.Fatalf("review failed: %v", err)
+	}
+
+	// 空位已释放（不再报 40901），但同一人不能重复报名：
+	// 被拒的用户 100 再次报名，命中防重校验返回 40903。
+	_, err = s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+	requireAppError(t, err, constants.CodeDuplicateSignup, constants.MsgDuplicateSignup)
+
+	// 空位释放：用户 101 现在可以报名成功，且收到报名成功通知。
+	reg101, err := s.reg.Create(a.ID, 101, "李四", "13900000000", "")
+	if err != nil {
+		t.Fatalf("create after rejection should succeed, got %v", err)
+	}
+	notifs := s.notifications(t, 101)
+	if len(notifs) != 1 || notifs[0].NotificationType != constants.NotificationSignupSuccess {
+		t.Fatalf("user 101 notifications = %+v, want 1 signup_success", notifs)
+	}
+
+	// 被拒报名记录仍在（未被删除），但不再占用名额。
+	cur, _ := s.reg.Get(reg.ID)
+	if cur.ReviewStatus != constants.ReviewStatusRejected {
+		t.Errorf("rejected registration review_status = %q", cur.ReviewStatus)
+	}
+
+	// 名额再次被占满：用户 102 报名失败。
+	_, err = s.reg.Create(a.ID, 102, "王五", "13700000000", "")
+	requireAppError(t, err, constants.CodeActivityFull, constants.MsgActivityFull)
+
+	// 重复审核：已拒绝的报名再次审核返回 40905，且不产生新通知。
+	_, err = s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusApproved)
+	requireAppError(t, err, constants.CodeReviewConflict, constants.MsgReviewConflict)
+	if got := len(s.notifications(t, 100)); got != 2 {
+		t.Errorf("user 100 notification count = %d, want 2 (signup + review_result)", got)
+	}
+	// 空位不因重复审核而再次变化：名额仍满。
+	_, err = s.reg.Create(a.ID, 102, "王五", "13700000000", "")
+	requireAppError(t, err, constants.CodeActivityFull, constants.MsgActivityFull)
+	_ = reg101
+}
+
 // TestExportCSVPermissions 导出名单的权限与内容。
 func TestExportCSVPermissions(t *testing.T) {
 	future := time.Now().Add(24 * time.Hour)
