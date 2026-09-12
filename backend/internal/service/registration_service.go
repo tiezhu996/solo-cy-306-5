@@ -108,6 +108,9 @@ func (s *RegistrationService) Review(id, operatorID uint64, operatorRole string,
 		if cur.ReviewStatus != constants.ReviewStatusPending {
 			return util.NewAppError(constants.CodeReviewConflict, constants.MsgReviewConflict)
 		}
+		if cur.Status == constants.RegistrationStatusCheckedIn {
+			return util.NewAppError(constants.CodeReviewConflict, "Registration[id="+itoa(id)+"] review conflict: status=checked_in")
+		}
 		if !constants.IsValidReviewStatus(reviewStatus) {
 			return util.NewAppError(constants.CodeValidationFailed, "Registration[id="+itoa(id)+"] review invalid status="+reviewStatus)
 		}

@@ -295,6 +295,9 @@ func TestCheckInFlow(t *testing.T) {
 		s := newTestStack(t)
 		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
 		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+		if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusApproved); err != nil {
+			t.Fatalf("approve failed: %v", err)
+		}
 
 		rec, err := s.checkin.CheckInByVoucher(a.ID, 5, reg.VoucherNo)
 		if err != nil {
@@ -308,10 +311,10 @@ func TestCheckInFlow(t *testing.T) {
 			t.Errorf("status = %q, want checked_in", cur.Status)
 		}
 		notifs := s.notifications(t, 100)
-		if len(notifs) != 2 {
-			t.Fatalf("notification count = %d, want 2", len(notifs))
+		if len(notifs) != 3 {
+			t.Fatalf("notification count = %d, want 3 (signup + review + checkin)", len(notifs))
 		}
-		n := notifs[1]
+		n := notifs[2]
 		if n.NotificationType != constants.NotificationCheckinSuccess {
 			t.Errorf("type = %q, want checkin_success", n.NotificationType)
 		}
@@ -324,6 +327,9 @@ func TestCheckInFlow(t *testing.T) {
 		s := newTestStack(t)
 		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
 		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+		if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusApproved); err != nil {
+			t.Fatalf("approve failed: %v", err)
+		}
 		if _, err := s.checkin.CheckInByVoucher(a.ID, 5, reg.VoucherNo); err != nil {
 			t.Fatalf("first checkin failed: %v", err)
 		}
@@ -337,8 +343,8 @@ func TestCheckInFlow(t *testing.T) {
 		if cnt != 1 {
 			t.Errorf("checkin record count = %d, want 1", cnt)
 		}
-		if got := len(s.notifications(t, 100)); got != 2 {
-			t.Errorf("notification count = %d, want 2", got)
+		if got := len(s.notifications(t, 100)); got != 3 {
+			t.Errorf("notification count = %d, want 3", got)
 		}
 	})
 
@@ -368,12 +374,102 @@ func TestCheckInFlow(t *testing.T) {
 		s := newTestStack(t)
 		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
 		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+		if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusApproved); err != nil {
+			t.Fatalf("approve failed: %v", err)
+		}
 		rec, err := s.checkin.CheckInByScan(a.ID, 5, itoa(reg.ID))
 		if err != nil {
 			t.Fatalf("scan checkin failed: %v", err)
 		}
 		if rec.CheckInMethod != constants.CheckInMethodScan {
 			t.Errorf("method = %q, want scan", rec.CheckInMethod)
+		}
+	})
+}
+
+// TestCheckInReviewOrdering 状态顺序约束：签到只对审核通过且仍有效的报名开放，
+// 已签到报名不能再被审核拒绝；统计中签到人数不会超过报名人数。
+func TestCheckInReviewOrdering(t *testing.T) {
+	future := time.Now().Add(24 * time.Hour)
+
+	t.Run("pending registration cannot checkin", func(t *testing.T) {
+		s := newTestStack(t)
+		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
+		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+
+		_, err := s.checkin.CheckInByVoucher(a.ID, 5, reg.VoucherNo)
+		requireAppError(t, err, constants.CodeReviewConflict,
+			"Registration[id="+itoa(reg.ID)+"] cannot checkin: review_status=pending")
+		// 事务回滚：无签到记录、无签到通知，报名状态不变。
+		var cnt int64
+		if err := s.db.Model(&model.CheckInRecord{}).Where("activity_id = ?", a.ID).Count(&cnt).Error; err != nil {
+			t.Fatalf("count checkins: %v", err)
+		}
+		if cnt != 0 {
+			t.Errorf("checkin record count = %d, want 0", cnt)
+		}
+		if got := len(s.notifications(t, 100)); got != 1 {
+			t.Errorf("notification count = %d, want 1 (signup only)", got)
+		}
+		cur, _ := s.reg.Get(reg.ID)
+		if cur.Status != constants.RegistrationStatusRegistered {
+			t.Errorf("status = %q, want registered", cur.Status)
+		}
+	})
+
+	t.Run("rejected registration cannot checkin", func(t *testing.T) {
+		s := newTestStack(t)
+		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
+		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+		if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusRejected); err != nil {
+			t.Fatalf("reject failed: %v", err)
+		}
+		_, err := s.checkin.CheckInByVoucher(a.ID, 5, reg.VoucherNo)
+		requireAppError(t, err, constants.CodeReviewConflict,
+			"Registration[id="+itoa(reg.ID)+"] cannot checkin: review_status=rejected")
+	})
+
+	t.Run("checked in registration cannot be rejected", func(t *testing.T) {
+		s := newTestStack(t)
+		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
+		reg, _ := s.reg.Create(a.ID, 100, "张三", "13800000000", "")
+		if _, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusApproved); err != nil {
+			t.Fatalf("approve failed: %v", err)
+		}
+		if _, err := s.checkin.CheckInByVoucher(a.ID, 5, reg.VoucherNo); err != nil {
+			t.Fatalf("checkin failed: %v", err)
+		}
+		// 已签到（已通过审核）再审核：重复审核原错误。
+		_, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusRejected)
+		requireAppError(t, err, constants.CodeReviewConflict, constants.MsgReviewConflict)
+		cur, _ := s.reg.Get(reg.ID)
+		if cur.ReviewStatus != constants.ReviewStatusApproved {
+			t.Errorf("review_status = %q, want approved (unchanged)", cur.ReviewStatus)
+		}
+		// 统计一致：签到人数不超过报名人数。
+		stats, err := s.activity.Stats(a.ID, 5, constants.RoleOrganizer)
+		if err != nil {
+			t.Fatalf("stats failed: %v", err)
+		}
+		if stats["registered_count"] != int64(1) || stats["checked_in_count"] != int64(1) {
+			t.Errorf("stats = %v, want registered=1 checked_in=1", stats)
+		}
+	})
+
+	t.Run("legacy checked-in pending registration cannot be reviewed", func(t *testing.T) {
+		// 修复前可能产生的脏数据：已签到但审核仍为 pending，审核必须被拒绝。
+		s := newTestStack(t)
+		a := s.mustActivity(t, 5, constants.ActivityStatusPublished, 10, future)
+		reg := s.mustRegistration(t, a.ID, 100, constants.RegistrationStatusCheckedIn, constants.ReviewStatusPending)
+		_, err := s.reg.Review(reg.ID, 5, constants.RoleOrganizer, constants.ReviewStatusRejected)
+		requireAppError(t, err, constants.CodeReviewConflict,
+			"Registration[id="+itoa(reg.ID)+"] review conflict: status=checked_in")
+		cur, _ := s.reg.Get(reg.ID)
+		if cur.ReviewStatus != constants.ReviewStatusPending {
+			t.Errorf("review_status = %q, want pending (unchanged)", cur.ReviewStatus)
+		}
+		if got := len(s.notifications(t, 100)); got != 0 {
+			t.Errorf("notification count = %d, want 0", got)
 		}
 	})
 }
