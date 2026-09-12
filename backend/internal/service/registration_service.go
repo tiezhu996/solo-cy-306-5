@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/csv"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -20,14 +21,15 @@ type RegistrationService struct {
 	db          *gorm.DB
 	repo        *repository.RegistrationRepository
 	activitySvc *ActivityService
-	notifyRepo  *repository.NotificationRepository
+	guard       *SignupGuard
+	notifier    *NotificationService
 	logger      *slog.Logger
 }
 
 // NewRegistrationService 构造报名服务。
 func NewRegistrationService(db *gorm.DB, repo *repository.RegistrationRepository, activitySvc *ActivityService,
-	notifyRepo *repository.NotificationRepository, logger *slog.Logger) *RegistrationService {
-	return &RegistrationService{db: db, repo: repo, activitySvc: activitySvc, notifyRepo: notifyRepo, logger: logger}
+	guard *SignupGuard, notifier *NotificationService, logger *slog.Logger) *RegistrationService {
+	return &RegistrationService{db: db, repo: repo, activitySvc: activitySvc, guard: guard, notifier: notifier, logger: logger}
 }
 
 // Create 在线报名：校验名额与截止时间、防重复报名，生成凭证号并发送报名成功通知。
@@ -35,7 +37,7 @@ func (s *RegistrationService) Create(activityID, userID uint64, name, phone, rem
 	s.logger.Info(constants.LogRegistrationCreateStart, "activity_id", activityID, "user_id", userID)
 	reg := &model.Registration{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := s.activitySvc.CheckRegistrationLimitTx(tx, activityID); err != nil {
+		if err := s.guard.CheckRegistrationLimitTx(tx, activityID); err != nil {
 			return err
 		}
 		if _, err := s.repo.FindByActivityAndUserTx(tx, activityID, userID); err == nil {
@@ -55,7 +57,7 @@ func (s *RegistrationService) Create(activityID, userID uint64, name, phone, rem
 			s.logger.Error(constants.LogRegistrationCreateFailed, "error", err)
 			return util.Wrap(err, "Registration[activity_id=%d,user_id=%d] create failed", activityID, userID)
 		}
-		if err := s.activitySvc.CreateSignupNotificationTx(tx, userID, constants.NotificationSignupSuccess,
+		if err := s.notifier.CreateSignupNotificationTx(tx, userID, constants.NotificationSignupSuccess,
 			"报名成功", "您已成功报名活动，凭证号："+reg.VoucherNo); err != nil {
 			return err
 		}
@@ -119,7 +121,7 @@ func (s *RegistrationService) Review(id, operatorID uint64, operatorRole string,
 		if reviewStatus == constants.ReviewStatusApproved {
 			content = "您的报名已通过审核，凭证号：" + cur.VoucherNo
 		}
-		if err := s.activitySvc.CreateSignupNotificationTx(tx, cur.UserID, constants.NotificationReviewResult, title, content); err != nil {
+		if err := s.notifier.CreateSignupNotificationTx(tx, cur.UserID, constants.NotificationReviewResult, title, content); err != nil {
 			return err
 		}
 		reg = cur
@@ -134,7 +136,7 @@ func (s *RegistrationService) Review(id, operatorID uint64, operatorRole string,
 
 // OfflineCreate 线下补录报名。
 func (s *RegistrationService) OfflineCreate(activityID, operatorID uint64, name, phone, remark string) (*model.Registration, error) {
-	if err := s.activitySvc.CheckRegistrationLimit(activityID); err != nil {
+	if err := s.guard.CheckRegistrationLimit(activityID); err != nil {
 		return nil, err
 	}
 	reg := &model.Registration{
@@ -199,4 +201,9 @@ func (s *RegistrationService) ExportCSV(activityID, operatorID uint64, operatorR
 	w.Flush()
 	filename := "registrations_" + strconv.FormatUint(activityID, 10) + "_" + time.Now().Format("20060102150405") + ".csv"
 	return filename, buf.String(), nil
+}
+
+// errNotFound 判断是否为未找到错误。
+func errNotFound(err error) bool {
+	return errors.Is(err, repository.ErrNotFound)
 }

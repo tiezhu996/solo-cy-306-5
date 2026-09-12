@@ -52,12 +52,14 @@ func main() {
 	notifyRepo := repository.NewNotificationRepository(db)
 
 	userSvc := service.NewUserService(userRepo, logger)
-	activitySvc := service.NewActivityService(activityRepo, regRepo, notifyRepo, checkinRepo, logger)
-	regSvc := service.NewRegistrationService(db, regRepo, activitySvc, notifyRepo, logger)
-	checkinSvc := service.NewCheckInRecordService(db, checkinRepo, regRepo, activitySvc, notifyRepo, logger)
+	notifySvc := service.NewNotificationService(notifyRepo, logger)
+	accessPolicy := service.NewActivityAccessPolicy()
+	signupGuard := service.NewSignupGuard(activityRepo)
+	activitySvc := service.NewActivityService(activityRepo, checkinRepo, accessPolicy, logger)
+	regSvc := service.NewRegistrationService(db, regRepo, activitySvc, signupGuard, notifySvc, logger)
+	checkinSvc := service.NewCheckInRecordService(db, checkinRepo, regRepo, notifySvc, logger)
 	commentSvc := service.NewCommentService(commentRepo, activitySvc, logger)
 	favoriteSvc := service.NewFavoriteService(favoriteRepo, activitySvc, logger)
-	notifySvc := service.NewNotificationService(notifyRepo, logger)
 
 	userHandler := handler.NewUserHandler(userSvc, logger)
 	activityHandler := handler.NewActivityHandler(activitySvc, logger)

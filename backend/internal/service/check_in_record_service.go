@@ -14,18 +14,17 @@ import (
 
 // CheckInRecordService 签到业务逻辑。
 type CheckInRecordService struct {
-	db          *gorm.DB
-	repo        *repository.CheckInRecordRepository
-	regRepo     *repository.RegistrationRepository
-	activitySvc *ActivityService
-	notifyRepo  *repository.NotificationRepository
-	logger      *slog.Logger
+	db       *gorm.DB
+	repo     *repository.CheckInRecordRepository
+	regRepo  *repository.RegistrationRepository
+	notifier *NotificationService
+	logger   *slog.Logger
 }
 
 // NewCheckInRecordService 构造签到服务。
 func NewCheckInRecordService(db *gorm.DB, repo *repository.CheckInRecordRepository, regRepo *repository.RegistrationRepository,
-	activitySvc *ActivityService, notifyRepo *repository.NotificationRepository, logger *slog.Logger) *CheckInRecordService {
-	return &CheckInRecordService{db: db, repo: repo, regRepo: regRepo, activitySvc: activitySvc, notifyRepo: notifyRepo, logger: logger}
+	notifier *NotificationService, logger *slog.Logger) *CheckInRecordService {
+	return &CheckInRecordService{db: db, repo: repo, regRepo: regRepo, notifier: notifier, logger: logger}
 }
 
 // CheckInByVoucher 凭证号签到。
@@ -87,7 +86,7 @@ func (s *CheckInRecordService) doCheckIn(reg *model.Registration, operatorID uin
 		if err := s.regRepo.UpdateTx(tx, cur); err != nil {
 			return util.Wrap(err, "Registration[id=%d] checkin update failed", cur.ID)
 		}
-		if err := s.activitySvc.CreateSignupNotificationTx(tx, cur.UserID, constants.NotificationCheckinSuccess,
+		if err := s.notifier.CreateSignupNotificationTx(tx, cur.UserID, constants.NotificationCheckinSuccess,
 			"签到成功", "您已完成签到，凭证号："+cur.VoucherNo); err != nil {
 			return err
 		}

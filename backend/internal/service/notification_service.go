@@ -4,8 +4,11 @@ import (
 	"log/slog"
 
 	"gbevent/internal/constants"
+	"gbevent/internal/model"
 	"gbevent/internal/repository"
 	"gbevent/internal/util"
+
+	"gorm.io/gorm"
 )
 
 // NotificationService 通知业务逻辑。
@@ -17,6 +20,28 @@ type NotificationService struct {
 // NewNotificationService 构造通知服务。
 func NewNotificationService(repo *repository.NotificationRepository, logger *slog.Logger) *NotificationService {
 	return &NotificationService{repo: repo, logger: logger}
+}
+
+// CreateSignupNotification 生成报名/审核/签到通知。
+func (s *NotificationService) CreateSignupNotification(userID uint64, notifType, title, content string) error {
+	n := &model.Notification{UserID: userID, NotificationType: notifType, Title: title, Content: content}
+	if err := s.repo.Create(n); err != nil {
+		s.logger.Error(constants.LogNotificationCreate, "error", err)
+		return util.Wrap(err, "Notification[user_id=%d] create failed", userID)
+	}
+	s.logger.Info(constants.LogNotificationCreate, "user_id", userID, "type", notifType)
+	return nil
+}
+
+// CreateSignupNotificationTx 在事务内生成报名/审核/签到通知。
+func (s *NotificationService) CreateSignupNotificationTx(tx *gorm.DB, userID uint64, notifType, title, content string) error {
+	n := &model.Notification{UserID: userID, NotificationType: notifType, Title: title, Content: content}
+	if err := s.repo.CreateTx(tx, n); err != nil {
+		s.logger.Error(constants.LogNotificationCreate, "error", err)
+		return util.Wrap(err, "Notification[user_id=%d] create failed", userID)
+	}
+	s.logger.Info(constants.LogNotificationCreate, "user_id", userID, "type", notifType)
+	return nil
 }
 
 // ListMine 查询我的通知。

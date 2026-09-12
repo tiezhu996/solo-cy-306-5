@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	"log/slog"
 	"time"
 
@@ -9,24 +8,22 @@ import (
 	"gbevent/internal/model"
 	"gbevent/internal/repository"
 	"gbevent/internal/util"
-
-	"gorm.io/gorm"
 )
 
-// ActivityService 活动业务逻辑。
+// ActivityService 活动流程与查询：创建、编辑、发布、结束、删除、列表、日历与统计。
+// 访问控制委托 ActivityAccessPolicy，报名名额/截止校验委托 SignupGuard，
+// 通知写入委托 NotificationService。
 type ActivityService struct {
 	repo        *repository.ActivityRepository
-	regRepo     *repository.RegistrationRepository
-	notifyRepo  *repository.NotificationRepository
 	checkinRepo *repository.CheckInRecordRepository
+	access      *ActivityAccessPolicy
 	logger      *slog.Logger
 }
 
 // NewActivityService 构造活动服务。
-func NewActivityService(repo *repository.ActivityRepository, regRepo *repository.RegistrationRepository,
-	notifyRepo *repository.NotificationRepository, checkinRepo *repository.CheckInRecordRepository,
-	logger *slog.Logger) *ActivityService {
-	return &ActivityService{repo: repo, regRepo: regRepo, notifyRepo: notifyRepo, checkinRepo: checkinRepo, logger: logger}
+func NewActivityService(repo *repository.ActivityRepository, checkinRepo *repository.CheckInRecordRepository,
+	access *ActivityAccessPolicy, logger *slog.Logger) *ActivityService {
+	return &ActivityService{repo: repo, checkinRepo: checkinRepo, access: access, logger: logger}
 }
 
 // Create 创建活动。
@@ -68,8 +65,8 @@ func (s *ActivityService) Update(id, operatorID uint64, operatorRole string, fie
 	if err != nil {
 		return nil, util.Wrap(err, "Activity[id=%d] update find failed", id)
 	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return nil, util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] update forbidden: organizer not match")
+	if err := s.access.RequireManager(a, operatorID, operatorRole, "update"); err != nil {
+		return nil, err
 	}
 	if v, ok := fields["title"].(string); ok && v != "" {
 		a.Title = v
@@ -105,8 +102,8 @@ func (s *ActivityService) Publish(id, operatorID uint64, operatorRole string) (*
 	if err != nil {
 		return nil, util.Wrap(err, "Activity[id=%d] publish find failed", id)
 	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return nil, util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] publish forbidden: organizer not match")
+	if err := s.access.RequireManager(a, operatorID, operatorRole, "publish"); err != nil {
+		return nil, err
 	}
 	if a.Status != constants.ActivityStatusDraft {
 		return nil, util.NewAppError(constants.CodeConflict, "Activity[id="+itoa(id)+"] publish conflict: status="+a.Status)
@@ -125,8 +122,8 @@ func (s *ActivityService) End(id, operatorID uint64, operatorRole string) (*mode
 	if err != nil {
 		return nil, util.Wrap(err, "Activity[id=%d] end find failed", id)
 	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return nil, util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] end forbidden: organizer not match")
+	if err := s.access.RequireManager(a, operatorID, operatorRole, "end"); err != nil {
+		return nil, err
 	}
 	if a.Status != constants.ActivityStatusPublished {
 		return nil, util.NewAppError(constants.CodeConflict, "Activity[id="+itoa(id)+"] end conflict: status="+a.Status)
@@ -145,8 +142,8 @@ func (s *ActivityService) Delete(id, operatorID uint64, operatorRole string) err
 	if err != nil {
 		return util.Wrap(err, "Activity[id=%d] delete find failed", id)
 	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(id)+"] delete forbidden: organizer not match")
+	if err := s.access.RequireManager(a, operatorID, operatorRole, "delete"); err != nil {
+		return err
 	}
 	if err := s.repo.Delete(id); err != nil {
 		return util.Wrap(err, "Activity[id=%d] delete failed", id)
@@ -199,8 +196,8 @@ func (s *ActivityService) Stats(activityID, operatorID uint64, operatorRole stri
 	if err != nil {
 		return nil, util.Wrap(err, "Activity[id=%d] stats find failed", activityID)
 	}
-	if operatorRole != constants.RoleAdmin && a.OrganizerID != operatorID {
-		return nil, util.NewAppError(constants.CodeForbidden, "Activity[id="+itoa(activityID)+"] stats forbidden: organizer not match")
+	if err := s.access.RequireManager(a, operatorID, operatorRole, "stats"); err != nil {
+		return nil, err
 	}
 	registered, err := s.repo.CountRegistered(activityID)
 	if err != nil {
@@ -222,80 +219,6 @@ func (s *ActivityService) Stats(activityID, operatorID uint64, operatorRole stri
 		"checked_in_count": checked,
 		"checkin_rate":     round2(rate),
 	}, nil
-}
-
-// CheckRegistrationLimit 校验报名名额与截止时间（供 RegistrationService 使用）。
-func (s *ActivityService) CheckRegistrationLimit(activityID uint64) error {
-	a, err := s.repo.FindByID(activityID)
-	if err != nil {
-		return util.Wrap(err, "Activity[id=%d] check limit failed", activityID)
-	}
-	return s.checkRegistrationLimit(a, func(activityID uint64) (int64, error) {
-		return s.repo.CountRegistered(activityID)
-	})
-}
-
-// CheckRegistrationLimitTx 在事务内校验报名名额与截止时间。
-func (s *ActivityService) CheckRegistrationLimitTx(tx *gorm.DB, activityID uint64) error {
-	a, err := s.repo.FindByIDForUpdate(tx, activityID)
-	if err != nil {
-		return util.Wrap(err, "Activity[id=%d] check limit failed", activityID)
-	}
-	return s.checkRegistrationLimit(a, func(activityID uint64) (int64, error) {
-		return s.repo.CountRegisteredTx(tx, activityID)
-	})
-}
-
-func (s *ActivityService) checkRegistrationLimit(a *model.Activity, countFn func(uint64) (int64, error)) error {
-	if a.Status == constants.ActivityStatusEnded {
-		return util.NewAppError(constants.CodeActivityEnded, constants.MsgActivityEnded)
-	}
-	if a.Status != constants.ActivityStatusPublished {
-		return util.NewAppError(constants.CodeConflict, "Activity[id="+itoa(a.ID)+"] not published")
-	}
-	if time.Now().After(a.SignupDeadline) {
-		return util.NewAppError(constants.CodeActivityEnded, "Activity[id="+itoa(a.ID)+"] signup deadline passed")
-	}
-	count, err := countFn(a.ID)
-	if err != nil {
-		return err
-	}
-	if a.Capacity > 0 && count >= int64(a.Capacity) {
-		return util.NewAppError(constants.CodeActivityFull, constants.MsgActivityFull)
-	}
-	return nil
-}
-
-// CreateSignupNotification 生成报名/审核/签到通知。
-func (s *ActivityService) CreateSignupNotification(userID uint64, notifType, title, content string) error {
-	n := &model.Notification{UserID: userID, NotificationType: notifType, Title: title, Content: content}
-	if err := s.notifyRepo.Create(n); err != nil {
-		s.logger.Error(constants.LogNotificationCreate, "error", err)
-		return util.Wrap(err, "Notification[user_id=%d] create failed", userID)
-	}
-	s.logger.Info(constants.LogNotificationCreate, "user_id", userID, "type", notifType)
-	return nil
-}
-
-// CreateSignupNotificationTx 在事务内生成报名/审核/签到通知。
-func (s *ActivityService) CreateSignupNotificationTx(tx *gorm.DB, userID uint64, notifType, title, content string) error {
-	n := &model.Notification{UserID: userID, NotificationType: notifType, Title: title, Content: content}
-	if err := s.notifyRepo.CreateTx(tx, n); err != nil {
-		s.logger.Error(constants.LogNotificationCreate, "error", err)
-		return util.Wrap(err, "Notification[user_id=%d] create failed", userID)
-	}
-	s.logger.Info(constants.LogNotificationCreate, "user_id", userID, "type", notifType)
-	return nil
-}
-
-// IsOrganizer 判断操作者是否活动组织者或管理员。
-func IsOrganizer(operatorID uint64, operatorRole string, organizerID uint64) bool {
-	return operatorRole == constants.RoleAdmin || operatorID == organizerID
-}
-
-// errNotFound 判断是否为未找到错误。
-func errNotFound(err error) bool {
-	return errors.Is(err, repository.ErrNotFound)
 }
 
 func itoa(v uint64) string {
